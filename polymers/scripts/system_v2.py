@@ -1,12 +1,15 @@
 import argparse
 import espressomd
 import espressomd.lb
-
+import espressomd.electrostatics
 import espressomd.observables
 import espressomd.accumulators
 import espressomd.polymer
+import espressomd.visualization
 import numpy as np
 import logging
+import threading
+import time
 import tqdm
 
 logging.basicConfig(level=logging.INFO)
@@ -22,11 +25,19 @@ N_MONOMER = args.num_monomer
 DENSITY = 5e-5
 SIGMA = 2.5 # Angstrom
 BOX_L = np.power((N_MONOMER / DENSITY), 1.0 / 3.0) * np.ones(3)
-BOX_L= np.round(BOX_L)
+BOX_L = np.round(BOX_L)
 L_BJERRUM = 2.84 # 7.1 Angstrom
+L_BJERRUM = 2.0 # 7.1 Angstrom
 DELTA_T = 0.01
 SEED = 42
-print(BOX_L)
+
+def time_it(func):
+    def wrapper(*args, **kwargs):
+        start_t = time.perf_counter()
+        func(*args, **kwargs)
+        print(f"Function {func.__name__} took {time.perf_counter() - start_t:.2f}s to execute.")
+    return wrapper
+
 def build_system():
     system = espressomd.System(box_l=BOX_L)
     system.periodicity = [True, True, True]
@@ -35,7 +46,6 @@ def build_system():
     logging.info(f"Created Simulation with {N_MONOMER} monomers and box length L={BOX_L}.")
     system.non_bonded_inter[0, 0].wca.set_params(epsilon=0.25, sigma=1.0)
     system.non_bonded_inter[0, 1].wca.set_params(epsilon=0.25, sigma=1.0)
-
     return system
 
 def build_polymer(system, n_monomers, fene,seed):
@@ -50,15 +60,17 @@ def build_polymer(system, n_monomers, fene,seed):
 def equilibrate_polymer(system,seed):
     logging.info("Removing overlaps of polymers...")
     FMAX = 0.001 * 0.25 * 1. / system.time_step**2
+    print("BEFORE MINIMIZATION", system.analysis.energy()["total"])
     system.integrator.set_steepest_descent(
-        f_max=FMAX,
-        gamma=10,
+        f_max=0,
+        gamma=30.,
         max_displacement=0.01)
     # FIX
-    logging.info("desired F_max polymers and counterions=" +str(FMAX))
+    logging.info("Desired F_max polymers and counterions=" +str(FMAX))
     FMAX = 10
     system.integrator.run(1000)
-    logging.info("F_max polymers="+str(np.abs(system.part.all().f).max()))
+    print("AFTER MINIMIZATION", system.analysis.energy()["total"])
+    logging.info("F_max polymers is " + str(np.abs(system.part.all().f).max()))
     system.integrator.set_vv()
     assert np.abs(system.part.all().f).max() < FMAX, "Overlap removal did not converge (Polymer)!"
     logging.info("Remove overlap polymer finished.")
@@ -68,27 +80,30 @@ def equilibrate_polymer(system,seed):
     system.thermostat.turn_off()
     # system.galilei.kill_particle_motion()
     # system.galilei.galilei_transform()
-    logging.info("F_max polymers 2="+str(np.abs(system.part.all().f).max()))
+    logging.info("F_max polymers"+str(np.abs(system.part.all().f).max()))
     logging.info("Equilibration polymer finished.")
 
-def generate_counterions(system, n_counter_ions,seed):
+def generate_counterions(system, n_counter_ions, seed):
     logging.info("Creating Counterions ...")
     counter_ions_pos = np.random.rand(n_counter_ions, 3) * BOX_L
     for pos in counter_ions_pos:
         system.part.add(pos=pos, q=1., type=1)
     FMAX = 0.001 * 0.25 * 1. / system.time_step**2
     logging.info("Removing overlap Counterions ...")
+    print("BEFORE MINIMIZATION", system.analysis.energy()["total"])
     system.integrator.set_steepest_descent(
-        f_max=FMAX,
-        gamma=10,
+        f_max=0,
+        gamma=30.,
         max_displacement=0.01)
     system.integrator.run(1000)
-    logging.info("desired F_max polymers and counterions="+str(FMAX))
-    logging.info("F_max polymers and counterions="+str(np.abs(system.part.all().f).max()))
+    print("AFTER MINIMIZATION", system.analysis.energy()["total"])
+    logging.info("Desired F_max polymers and counterions="+str(FMAX))
+    logging.info("F_max polymers and counterions is " + str(np.abs(system.part.all().f).max()))
+    # assert False
     # FIX
     FMAX = 10
     logging.info("Equilibration with counterions")
-    assert np.abs(system.part.all().f).max() < FMAX, "Overlap removal did not converge! (polzmer and counterions)"
+    assert np.abs(system.part.all().f).max() < FMAX, "Overlap removal did not converge! (polymer and counterions)"
     logging.info("Remove overlap finished.")
     logging.info("Equilibration ...")
     system.integrator.set_vv()
@@ -97,44 +112,66 @@ def generate_counterions(system, n_counter_ions,seed):
     system.thermostat.turn_off()
 
 #prefactor =l_be=jerrum*kT/e^2
-def turn_on_electrostatics(l_bjerrum):
+def turn_on_electrostatics(system, l_bjerrum, seed):
+    # system.galilei.kill_particle_motion()
+    # system.galilei.galilei_transform()
     p3m = espressomd.electrostatics.P3M(prefactor=l_bjerrum, accuracy=0.0001)
     system.electrostatics.solver = p3m
+    # system.actors.add(p3m)
     logging.info("P3m turned on.")
+    logging.info("Equilibration ...")
+    system.thermostat.set_langevin(kT=1.0, gamma=1.0, seed=seed)
+    system.integrator.run(2000)
+    system.thermostat.turn_off()
 
-def set_hydrodynamic_interaction_walberla(seed):
-    logging.info("Set hydrodynamic interactions walberla")
+def set_hydrodynamic_interaction_walberla(system, seed):
+    logging.info("Set hydrodynamic interactions Walberla.")
     system.galilei.kill_particle_motion()
     system.galilei.galilei_transform()
-    lb=espressomd.lb.LBFluidWalberla(
-        agrid=1.0, density=0.84, kinematic_viscosity=3.0, tau=system.time_step,kT=1)
+    lb=espressomd.lb.LBFluidWalberlaGPU(
+        agrid=1.0, density=0.864, kinematic_viscosity=3.0, tau=system.time_step, kT=1)
     system.lb = lb
     system.thermostat.set_lb(LB_fluid=lb, seed=seed, gamma=20.0) 
 
-def set_hydrodynamic_interaction_gpu(seed):
-    logging.info("Set hydrodynamic interactions walberla")
+def set_hydrodynamic_interaction_gpu(system, seed):
+    logging.info("Set hydrodynamic interactions GPU.")
     system.galilei.kill_particle_motion()
     system.galilei.galilei_transform()
-    lbf = espressomd.lb.LBFluidGPU(agrid=1, dens=10, visc=.1, tau=0.01)
-    system.thermostat.set_lb(LB_fluid=lbf, seed=seed, gamma=20.0) 
+    lbf = espressomd.lb.LBFluidGPU(agrid=1.0, dens=0.864, visc=3.0, tau=system.time_step)
     system.actors.add(lbf)
+    system.thermostat.set_lb(LB_fluid=lbf, seed=seed, gamma=20.0)
 
-def simulate_with_HI(total_steps,steps_per_iteration):
+@time_it
+def simulate_with_HI(system, total_steps):
+    system.integrator.set_vv()
     logging.info(f"Simulate with hydrodynamic interactions for {total_steps} steps")
-    num_iterations = int(total_steps/steps_per_iteration)
-    for _ in tqdm.tqdm(range(num_iterations)):
-        system.integrator.run(steps_per_iteration)
+    for _ in tqdm.tqdm(range(total_steps)):
+        system.integrator.run(1)
+
+def main_thread(visualizer):
+    system.integrator.set_vv()
+    while True:
+        system.integrator.run(1)
+        visualizer.update()
+
 if __name__ == "__main__":
     system = build_system()
+    # visualizer = espressomd.visualization.openGLLive(system)
     fene = espressomd.interactions.FeneBond(k=30, r_0=0.91, d_r_max=1.5)
     system.bonded_inter.add(fene)
-    build_polymer(system, N_MONOMER, fene,SEED)
-    equilibrate_polymer(system,SEED) # SOMESH FRAGEN WARUM NICHT KONVERGIERT
-    vel = espressomd.observables.ParticleVelocities(ids=[i for i in range(len(system.part.all()))])
-    accumulator = espressomd.accumulators.TimeSeries(obs=vel, delta_N=2)
-    system.auto_update_accumulators.add(accumulator)
+    build_polymer(system, N_MONOMER, fene, SEED)
+    equilibrate_polymer(system, SEED) # SOMESH FRAGEN WARUM NICHT KONVERGIERT
+    polymer_pos = espressomd.observables.ParticlePositions(ids=system.part.select(type=0).id)
+    accumulator1 = espressomd.accumulators.TimeSeries(obs=polymer_pos, delta_N=2)
+    system.auto_update_accumulators.add(accumulator1)
     generate_counterions(system, N_MONOMER,SEED)
-    turn_on_electrostatics(l_bjerrum=L_BJERRUM)
-    set_hydrodynamic_interaction_walberla(SEED)
-    simulate_with_HI(1000,100)
-    #print(np.sum(accumulator.time_series()**2 / 2, axis=1).sum(1))
+    ions_pos = espressomd.observables.ParticlePositions(ids=system.part.select(type=1).id)
+    accumulator2 = espressomd.accumulators.TimeSeries(obs=ions_pos, delta_N=2)
+    system.auto_update_accumulators.add(accumulator2)
+    turn_on_electrostatics(system, l_bjerrum=L_BJERRUM, seed=SEED)
+    set_hydrodynamic_interaction_walberla(system, SEED)
+    simulate_with_HI(system, 100000)
+    np.save("../data/polymer_equilibration", accumulator1.time_series())
+    np.save("../data/ion_equilibration", accumulator2.time_series())
+    print(accumulator1.time_series().shape)
+    print(accumulator2.time_series().shape)
