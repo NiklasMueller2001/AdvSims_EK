@@ -44,8 +44,14 @@ E_FIELD=25
 RHO_A = 26.18
 VISCOCITY = 0.25
 GAMMA = 15
-POSITION_WALL_1 = 1.5
-POSITION_WALL_2 = -14.5
+
+CONST1 = 1.25
+CONST2 = -14.75
+LBB1 = 1.5
+LBB2 = -14.5
+WALLP1 = 1
+WALLP2 = 15
+
 E_FORCE = np.array([E_FIELD,0,0])
 np.random.seed(SEED)
 # assert False
@@ -63,7 +69,6 @@ def build_system(sigma):
     system.periodicity = [True, True, True]
     system.cell_system.skin = 0.4
     system.time_step = DELTA_T
-    # system.non_bonded_inter[0, 1].wca.set_params(epsilon=1., sigma=1.) #elc error
     system.non_bonded_inter[0, 1].wca.set_params(epsilon=1., sigma=1)
     system.non_bonded_inter[0, 0].wca.set_params(epsilon=1, sigma=1.)
     system.non_bonded_inter[0, 2].wca.set_params(epsilon=1., sigma=1)
@@ -98,7 +103,7 @@ def steepest_descent_counterions(system,steps):
 
 
 
-def generate_wall_particle(system,p_per_site,n_counter_ions):
+def generate_wall_particle(system,walld, wallu,p_per_site,n_counter_ions):
     logging.info("Creating Wall Particles ...")
 
     xs = np.linspace(0,16,p_per_site+1)
@@ -106,11 +111,11 @@ def generate_wall_particle(system,p_per_site,n_counter_ions):
     xss, yss = np.meshgrid(xs[:-1],xs[:-1])
     for xs,ys in zip(xss,yss):
         for x,y in zip(xs,ys):
-            system.part.add(pos=[x,y,1.5], q=-(n_counter_ions/2)/(p_per_site**2), type=1,fix =[True,True,True])
-            system.part.add(pos=[x,y,14.5], q=-(n_counter_ions/2)/(p_per_site**2), type=1, fix =[True,True,True])
-def generate_constraint():
-    bottom_constraint = espressomd.shapes.Wall(dist=1.5, normal=[0, 0, 1])
-    top_constraint = espressomd.shapes.Wall(dist=-14.5, normal=[0, 0, -1])
+            system.part.add(pos=[x,y,walld], q=-(n_counter_ions/2)/(p_per_site**2), type=1,fix =[True,True,True])
+            system.part.add(pos=[x,y,wallu], q=-(n_counter_ions/2)/(p_per_site**2), type=1, fix =[True,True,True])
+def generate_constraint(const1,const2):
+    bottom_constraint = espressomd.shapes.Wall(dist=const1, normal=[0, 0, 1])
+    top_constraint = espressomd.shapes.Wall(dist=const2, normal=[0, 0, -1])
 
     system.constraints.add(shape=bottom_constraint, particle_type=2,penetrable=False)
     system.constraints.add(shape=top_constraint, particle_type=2,penetrable=False)
@@ -226,15 +231,16 @@ def generate_accu(system,observable,id):
 
 
 if __name__ == "__main__":
-    system = build_system(1.8)
-    visualizer= espressomd.visualization.openGLLive(system)
+    logging.info(f"{VERSION_FLAG} {COM_FLAG}")
+    system = build_system(1)
+    #dvisualizer= espressomd.visualization.openGLLive(system)
     generate_counterions(system,128,SEED)
-    generate_wall_particle(system,8,128)
-    generate_constraint()
+    generate_wall_particle(system,WALLP1,WALLP2,8,128)
+    generate_constraint(CONST1,CONST2)
 
     
 
-    steepest_descent_counterions(system,10000)
+    steepest_descent_counterions(system,1000)
     turn_on_electrostatics(system,L_BJERRUM,COM_FLAG,SEED)
     turn_on_e_field(system,1*E_FORCE)
     #visualizer.run(1)
@@ -242,36 +248,38 @@ if __name__ == "__main__":
     #system.integrator.run(1000)
     #accumulator1 = generate_accu(system,espressomd.observables.ParticlePositions,system.part.select(type=0).id )
 
-    lbf = set_hydrodynamic_interaction(system, POSITION_WALL_1, POSITION_WALL_2,0,COM_FLAG,SEED)
-    eq_steps = int(1e2)
-    tqdm_update = 10
+    lbf = set_hydrodynamic_interaction(system, LBB1, LBB2,0,COM_FLAG,SEED)
+    # visualizer= espressomd.visualization.openGLLive(system)
+    # visualizer.run()
+    eq_steps = int(5e4)
+    tqdm_update = 100
     logging.info('Equilibrating')
     for _ in tqdm.tqdm(range(eq_steps//tqdm_update)):
          system.integrator.run(tqdm_update)
-    total_stepps = int(1e2)
-    tqdm_update = 10
-    # accumulator5 = calculate_dens_accu(system, espressomd.observables.LBVelocityProfile(
-    #                                     n_x_bins=1,
-    #                                     n_y_bins=1,
-    #                                     n_z_bins=26,
-    #                                     min_x=0,
-    #                                     min_y=0,
-    #                                     min_z=1.5,
-    #                                     max_x=16,
-    #                                     max_y=16,
-    #                                     max_z=14.5, 
-    #                                     allow_empty_bins=True,
-    #                                     sampling_offset_x=0,
-    #                                     sampling_offset_y=0,
-    #                                     sampling_offset_z=0,
-    #                                     sampling_delta_x=16,
-    #                                     sampling_delta_y=16,
-    #                                     sampling_delta_z=0.5
-    # ))
+    total_stepps = int(1e5)
+    tqdm_update = 100
+    accumulator5 = calculate_dens_accu(system, espressomd.observables.LBVelocityProfile(
+                                        n_x_bins=1,
+                                        n_y_bins=1,
+                                        n_z_bins=26,
+                                        min_x=0,
+                                        min_y=0,
+                                        min_z=0,
+                                        max_x=16,
+                                        max_y=16,
+                                        max_z=16, 
+                                        allow_empty_bins=True,
+                                        sampling_offset_x=0,
+                                        sampling_offset_y=0,
+                                        sampling_offset_z=0,
+                                        sampling_delta_x=16,
+                                        sampling_delta_y=16,
+                                        sampling_delta_z=1
+    ))
     accumulator6 = calculate_dens_accu(system, espressomd.observables.DensityProfile(
                                         n_x_bins=1,
                                         n_y_bins=1,
-                                        n_z_bins=16,
+                                        n_z_bins=100,
                                         min_x=0,
                                         min_y=0,
                                         min_z=0,
@@ -290,7 +298,7 @@ if __name__ == "__main__":
     accumulator7 = calculate_dens_accu(system, espressomd.observables.FluxDensityProfile(
                                         n_x_bins=1,
                                         n_y_bins=1,
-                                        n_z_bins=16,
+                                        n_z_bins=32,
                                         min_x=0,
                                         min_y=0,
                                         min_z=0,
@@ -326,17 +334,17 @@ if __name__ == "__main__":
 
                 
 
-    folder = 'versiontest'
+    folder = '4_2_CPU'
     if not os.path.isdir(f"./{folder}"):
         os.mkdir(f"./{folder}")
-    filename = f"{VERSION_FLAG}_{COM_FLAG}_steps_{total_stepps}_walls_{POSITION_WALL_1}_{POSITION_WALL_2}_{E_FORCE[0]}"
+    filename = f"{VERSION_FLAG}_{COM_FLAG}_steps_{total_stepps}_const_{CONST1}_{CONST2}_lbb_{LBB1}_{LBB2}_walp_{WALLP1}_{WALLP2}"
     # np.save(f"./{folder}/ion_density_{filename}", accumulator1.time_series())
-    #np.save(f"./{folder}/flow_profile_{filename}.npy", accumulator5.time_series())
+    np.save(f"./{folder}/flow_profile_{filename}.npy", accumulator5.time_series())
     np.save(f"./{folder}/density_profile_{filename}.npy", accumulator6.time_series())
     np.save(f"./{folder}/ions_flux_density_profile_{filename}.npy", accumulator7.time_series())
 
     logging.info("saving finished")
-    logging.info(f"walls: {POSITION_WALL_1} {POSITION_WALL_2}")
+    logging.info(f"walls: {filename}")
 
 
     # fig1 = plt.figure(figsize=(10, 6))
