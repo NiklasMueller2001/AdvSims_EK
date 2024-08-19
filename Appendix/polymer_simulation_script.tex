@@ -1,0 +1,352 @@
+%!TEX root = ../Lab_report.tex
+\onecolumn
+\lstset{basicstyle=\footnotesize\ttfamily, breaklines=true}
+\section{Appendix}
+\subsection{Polymer simulation script}
+In the following, the \texttt{Python} script for the simulation of the polymer electrophoresis is given. \\
+First, the required features from the \texttt{espressomd} package are imported and global constants for the physical system are set. 
+\begin{lstlisting}[language=python]
+import argparse
+import espressomd
+import espressomd.lb
+import espressomd.version
+import espressomd.electrostatics
+import espressomd.observables
+import espressomd.accumulators
+import espressomd.polymer
+import espressomd.visualization
+import numpy as np
+import logging
+import pickle
+import time
+import tqdm
+import matplotlib.pyplot as plt
+import espressomd.io.writer.vtf
+from itertools import repeat
+
+logging.basicConfig(level=logging.INFO)
+
+required_features = ["LENNARD_JONES"]
+espressomd.assert_features(required_features)
+
+parser = argparse.ArgumentParser(epilog=__doc__)
+parser.add_argument('-n', '--num_monomer', type=int, required=True)
+parser.add_argument('-steps', '--sim_steps', type=int, required=True)
+parser.add_argument('-gamma', '--gamma_lb', type=float, required=False, default=20.)
+parser.add_argument('-write_to_vtf', type=bool, required=False, default=False)
+parser.add_argument('-p3m_eq_steps', type=int, required=False, default=1000000)
+parser.add_argument('-e_field', type=bool, required=False, default=False)
+args = parser.parse_args()
+
+N_MONOMER = args.num_monomer
+TOTAL_TIME_STEPS = args.sim_steps
+EQULIBRATION_STEPS = int(1e6)
+P3M_EQ_STEPS = args.p3m_eq_steps
+WRITE_TO_VTF = args.write_to_vtf
+GAMMA = args.gamma_lb
+E_FIELD = 0.1 if args.e_field else 0.
+logging.info(f"Setting external E-field of {E_FIELD}.")
+DENSITY = 5e-5
+SIGMA = 1. # 2.5 Angstrom
+BOX_L = np.power((N_MONOMER / DENSITY), 1.0 / 3.0) * np.ones(3)
+BOX_L = np.round(BOX_L)
+L_BJERRUM = 2.84 # 7.1 Angstrom
+# L_BJERRUM = 2.0 # 7.1 Angstrom
+DELTA_T = 0.01
+SEED = 42
+\end{lstlisting}
+Subsequently, functions are defined for building the system box, the polymer and the counterions. The function \texttt{equilibrate\_polymer} is responsible for removing overlaps after the insertion of new particles in the system.
+\begin{lstlisting}[language=python]
+def time_it(func):
+	# Simple wrapper to measure the execution time of different functions.
+	def wrapper(*args, **kwargs):
+		start_t = time.perf_counter()
+		func(*args, **kwargs)
+		print(f"Function {func.__name__} took {time.perf_counter() - start_t:.2f}s to execute.")
+	return wrapper
+
+def build_system():
+	system = espressomd.System(box_l=BOX_L)
+	system.periodicity = [True, True, True]
+	system.cell_system.skin = 0.4
+	system.time_step = DELTA_T
+	logging.info(f"Created Simulation with {N_MONOMER} monomers and box length L={BOX_L}.")
+	system.non_bonded_inter[0, 0].wca.set_params(epsilon=0.25, sigma=1.0)
+	system.non_bonded_inter[0, 1].wca.set_params(epsilon=0.25, sigma=1.0)
+	system.non_bonded_inter[1, 1].wca.set_params(epsilon=0.25, sigma=1.0)
+	return system
+
+def build_polymer(system, n_monomers, fene, seed):
+	polymer_pos = espressomd.polymer.linear_polymer_positions(n_polymers=1, beads_per_chain=n_monomers, seed=seed, bond_length=0.91, min_distance=0.9, start_positions=np.expand_dims(BOX_L/2., 0))
+	p_previous = None
+	for pos in polymer_pos[0]:
+		p = system.part.add(pos=pos, type=0, q=-1)
+		if p_previous is not None:
+			p.add_bond((fene, p_previous))
+	p_previous = p
+
+def equilibrate_polymer(system,seed):
+	logging.info("Removing overlaps of polymers...")
+	print("BEFORE MINIMIZATION", system.analysis.energy()["total"])
+	system.integrator.set_steepest_descent(
+		f_max=0,
+		gamma=10.,
+		max_displacement=0.01)
+	logging.info("Desired F_max polymers and counterions=" +str(FMAX))
+	FMAX = 10
+	system.integrator.run(1000)
+	print("AFTER MINIMIZATION", system.analysis.energy()["total"])
+	logging.info("F_max polymers is " + str(np.abs(system.part.all().f).max()))
+	system.integrator.set_vv()
+	logging.info("Remove overlap polymer finished.")
+	logging.info("Equilibration polymer ...")
+	system.thermostat.set_langevin(kT=1.0, gamma=1.0, seed=seed)
+	system.integrator.run(20000)
+	system.thermostat.turn_off()
+	# system.galilei.kill_particle_motion()
+	# system.galilei.galilei_transform()
+	logging.info("F_max polymers"+str(np.abs(system.part.all().f).max()))
+	logging.info("Equilibration polymer finished.")
+
+def generate_counterions(system, n_counter_ions, seed):
+	logging.info("Creating Counterions ...")
+	# Spawn counterions closer around polymer
+	com_polymer = system.part.select(type=0).pos.mean(0)
+	counter_ions_pos = ((np.random.rand(n_counter_ions, 3) * 2) - 1) * BOX_L/ 2 + com_polymer
+	# counter_ions_pos = np.random.rand(n_counter_ions, 3) * BOX_L
+	for pos in counter_ions_pos:
+		system.part.add(pos=pos, q=1., type=1)
+	FMAX = 10
+	logging.info("Removing overlap Counterions ...")
+	print("BEFORE MINIMIZATION", system.analysis.energy()["total"])
+	system.integrator.set_steepest_descent(
+	f_max=0,
+	gamma=30.,
+	max_displacement=0.01)
+	system.integrator.run(1000)
+	print("AFTER MINIMIZATION", system.analysis.energy()["total"])
+	logging.info("Desired F_max polymers and counterions="+str(FMAX))
+	logging.info("F_max polymers and counterions is " + str(np.abs(system.part.all().f).max()))
+	logging.info("Equilibration with counterions")
+	logging.info("Remove overlap finished.")
+	logging.info("Equilibration ...")
+	system.integrator.set_vv()
+	system.thermostat.set_langevin(kT=1.0, gamma=1.0, seed=seed)
+	system.integrator.run(20000)
+	system.thermostat.turn_off()
+\end{lstlisting}		
+After the insertion of all particles to the system, electrostatic and hydrodynamic interactions are activated and the system is equilibrated.
+\begin{lstlisting}[language=python]
+def turn_on_e_field(system):
+	system.part.select(q=-1).ext_force = [0, 0, -E_FIELD]
+	system.part.select(q=1).ext_force = [0, 0, E_FIELD]
+	logging.info(f"Turned on E-field of {E_FIELD}.")
+
+def turn_on_electrostatics(system, l_bjerrum, seed):
+	if espressomd.version.minor() == 2:
+		logging.info("P3m with GPU acceleration turned on.")
+		p3m = espressomd.electrostatics.P3MGPU(prefactor=l_bjerrum, accuracy=0.0001)
+		system.actors.add(p3m)
+	else:
+		logging.info("P3m with NO GPU acceleration turned on.")
+		p3m = espressomd.electrostatics.P3M(prefactor=l_bjerrum, accuracy=0.0001)
+		system.electrostatics.solver = p3m
+	logging.info("Equilibration ...")
+	system.thermostat.set_langevin(kT=1.0, gamma=1.0, seed=seed)
+	for _ in tqdm.tqdm(range(P3M_EQ_STEPS), desc="Equilibrating electrostatics..."):
+		system.integrator.run(1)
+	system.thermostat.turn_off()
+
+def set_hydrodynamic_interaction_walberla(system, seed, gamma):
+	logging.info("Set hydrodynamic interactions Walberla.")
+	system.galilei.kill_particle_motion()
+	system.galilei.galilei_transform()
+	lb=espressomd.lb.LBFluidWalberlaGPU(
+		agrid=1.0, density=0.864, kinematic_viscosity=3.0, tau=system.time_step, kT=1, ext_force_density=[0.0,0.0,0.0], seed=seed)
+	system.lb = lb
+	system.thermostat.set_lb(LB_fluid=lb, seed=seed, gamma=gamma)
+
+@time_it
+def equilibration_run(system, eq_steps):
+	logging.info(f"Equilibrate with hydrodynamic interactions for {eq_steps} steps.")
+	for i in tqdm.tqdm(range(eq_steps), desc="Running LB..."):
+		system.integrator.run(1)
+\end{lstlisting}
+The function \texttt{simulate\_with\_HI} is the main simulation function of the script. This function will be invoked after accumulators that sample data during the simulation have been initialized. In \texttt{save\_observables}, all gathered data is saved onto the file system. The function \texttt{calc\_effective\_charge} computes the effective charge $Q_\text{eff}$ in the current state of the system.
+\begin{lstlisting}[language=python]
+@time_it
+def simulate_with_HI(system, total_steps, gamma, write_to_vtf=False):
+	system.integrator.set_vv()
+	logging.info(f"Simulate with hydrodynamic interactions for {total_steps} steps.")
+	for i in tqdm.tqdm(range(total_steps), desc="Running LB"):
+		system.integrator.run(1)
+	logging.info("Saving trajectories.")
+	if write_to_vtf is True:
+		if E_FIELD == 0.:
+			path = f'../data/trajectory_{gamma=}_{N_MONOMER}_{total_steps=}.vtf'
+		else:
+			path = f'../data/trajectory_{gamma=}_{N_MONOMER}_{total_steps=}_E.vtf'
+		with open(path, mode='w+t') as f:
+		espressomd.io.writer.vtf.writevsf(system, f)
+		espressomd.io.writer.vtf.writevcf(system, f)    
+		for i in tqdm.tqdm(range(300000), desc="Sampling"):
+			system.integrator.run(1)
+			espressomd.io.writer.vtf.writevcf(system, f)
+		logging.info("Saving finished.")
+
+def save_observables(correlator1, correlator2, correlator3, correlator4, polymer_velocity_mean, Q_eff):
+	correlator1.finalize()
+	correlator2.finalize()
+	correlator3.finalize()
+	correlator4.finalize()
+	
+	corr_dict = {
+		"results_monomer": correlator1.result(),
+		"lag_times_monomer": correlator1.lag_times(),
+		"sample_sizes_monomer": correlator1.sample_sizes(),
+		"results_counterions": correlator3.result(),
+		"lag_times_counterions": correlator3.lag_times(),
+		"sample_sizes_counterions": correlator3.sample_sizes(),
+		"results_all": correlator2.result(),
+		"lag_times_all": correlator2.lag_times(),
+		"sample_sizes_all": correlator2.sample_sizes(),
+		"results_polymer_com": correlator4.result(),
+		"lag_times_polymer_com": correlator4.lag_times(),
+		"sample_sizes_polymer_com": correlator4.sample_sizes(),
+		"Q_eff": Q_eff
+	}
+	
+	if E_FIELD == 0.:
+		path = f"../results/n={N_MONOMER}/simulation_{TOTAL_TIME_STEPS}_{P3M_EQ_STEPS}_{GAMMA}.npz"
+	else:
+		path = f"../results/n={N_MONOMER}/simulation_{TOTAL_TIME_STEPS}_{P3M_EQ_STEPS}_{GAMMA}_E.npz"
+	np.savez(
+		path,
+		correlator=corr_dict,
+		chain_velocity_mean=polymer_velocity_mean.mean(),
+		num_monomers=N_MONOMER,
+	)
+	
+	def calc_effective_charge():
+		counter = 0
+		monomers = list(system.part.select(q=-1,type=0).id)
+		qions = list(system.part.select(q=1, type=1).id)
+		for mon_id in monomers:
+			for qion_id in qions:
+				dist = system.distance(system.part.by_id(mon_id),system.part.by_id(qion_id))
+				if dist <= 2.0:
+					counter += 1
+					qions.remove(qion_id)
+					break
+		Q_eff = float((len(monomers)-counter)/len(monomers))
+		return Q_eff
+\end{lstlisting}
+Finally, everything is put together. After the equilibration run, observables and corresponding correlators of the velocities of monomers and counterions are defined.
+\begin{lstlisting}[language=python]
+if __name__ == "__main__":
+	system = build_system()
+	fene = espressomd.interactions.FeneBond(k=30, d_r_max=1.5)
+	system.bonded_inter.add(fene)
+	build_polymer(system, N_MONOMER, fene, SEED)
+	equilibrate_polymer(system, SEED)
+	polymer_pos = espressomd.observables.ParticlePositions(ids=system.part.select(type=0).id)
+	accumulator1 = espressomd.accumulators.TimeSeries(obs=polymer_pos, delta_N=2)
+	system.auto_update_accumulators.add(accumulator1)
+	generate_counterions(system, N_MONOMER,SEED)
+	ions_pos = espressomd.observables.ParticlePositions(ids=system.part.select(type=1).id)
+	accumulator2 = espressomd.accumulators.TimeSeries(obs=ions_pos, delta_N=2)
+	system.auto_update_accumulators.add(accumulator2)
+	turn_on_e_field(system)
+	turn_on_electrostatics(system, l_bjerrum=L_BJERRUM, seed=SEED)
+	set_hydrodynamic_interaction_walberla(system, SEED, gamma=GAMMA)
+	equilibration_run(system, eq_steps=EQULIBRATION_STEPS)
+	
+	# Defining some observables
+	monomer_velocity_obs = espressomd.observables.FluxDensityProfile(
+		ids=system.part.select(type=0).id,
+		n_x_bins=1,
+		n_y_bins=1,
+		n_z_bins=1,
+		min_x=0,
+		min_y=0,
+		min_z=0,
+		max_x=BOX_L[0],
+		max_y=BOX_L[1],
+		max_z=BOX_L[2],
+	)
+	counterions_velocity_obs = espressomd.observables.FluxDensityProfile(
+		ids=system.part.select(type=1).id,
+		n_x_bins=1,
+		n_y_bins=1,
+		n_z_bins=1,
+		min_x=0,
+		min_y=0,
+		min_z=0,
+		max_x=BOX_L[0],
+		max_y=BOX_L[1],
+		max_z=BOX_L[2],
+	)
+	all_velocity_obs = espressomd.observables.FluxDensityProfile(
+		ids=system.part.all().id,
+		n_x_bins=1,
+		n_y_bins=1,
+		n_z_bins=1,
+		min_x=0,
+		min_y=0,
+		min_z=0,
+		max_x=BOX_L[0],
+		max_y=BOX_L[1],
+		max_z=BOX_L[2],
+	)
+	polymer_velocity_obs = espressomd.observables.ComVelocity(ids=system.part.select(type=0).id)
+	polymer_velocity_mean = espressomd.accumulators.MeanVarianceCalculator(
+		obs=monomer_velocity_obs, delta_N=1
+	)
+		correlator1 = espressomd.accumulators.Correlator(
+		obs1=monomer_velocity_obs,
+		obs2=polymer_velocity_obs,
+		corr_operation="scalar_product",
+		delta_N=1,
+		tau_max=TOTAL_TIME_STEPS * system.time_step,
+		tau_lin=16,
+		compress1="discard2",
+	)
+	correlator2 = espressomd.accumulators.Correlator(
+		obs1=all_velocity_obs,
+		obs2=polymer_velocity_obs,
+		corr_operation="scalar_product",
+		delta_N=1,
+		tau_max=TOTAL_TIME_STEPS * system.time_step,
+		tau_lin=16,
+		compress1="discard2",
+	)
+	correlator3 = espressomd.accumulators.Correlator(
+		obs1=counterions_velocity_obs,
+		obs2=polymer_velocity_obs,
+		corr_operation="scalar_product",
+		delta_N=1,
+		tau_max=TOTAL_TIME_STEPS * system.time_step,
+		tau_lin=16,
+		compress1="discard2",
+	)
+	correlator4 = espressomd.accumulators.Correlator(
+		obs1=polymer_velocity_obs,
+		obs2=polymer_velocity_obs,
+		corr_operation="scalar_product",
+		delta_N=1,
+		tau_max=TOTAL_TIME_STEPS * system.time_step,
+		tau_lin=16,
+		compress1="discard2",
+	)
+	system.auto_update_accumulators.add(polymer_velocity_mean)
+	system.auto_update_accumulators.add(correlator1)
+	system.auto_update_accumulators.add(correlator2)
+	system.auto_update_accumulators.add(correlator3)
+	system.auto_update_accumulators.add(correlator4)
+	simulate_with_HI(system, TOTAL_TIME_STEPS, gamma=GAMMA, write_to_vtf=WRITE_TO_VTF)
+	Q_eff = []
+	for _ in tqdm.trange(200):
+		Q_eff.append(calc_effective_charge())
+		system.integrator.run(9000)
+	save_observables(correlator1, correlator2, correlator3, correlator4, polymer_velocity_mean, Q_eff)
+\end{lstlisting}
