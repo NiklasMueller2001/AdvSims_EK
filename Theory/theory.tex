@@ -3,7 +3,71 @@
 %*********************************** Theory Chapter *****************************
 %*******************************************************************************
 \section{Theory}
+\subsection{Lattice-Boltzmann method}
+The Boltzmann equation describes the statistical behavior of a thermodynamic system out of equilibrium. It is given by:
+
+\begin{equation}\label{eq:boltzmann-transport}
+\frac{\partial f}{\partial t} + \mathbf{v} \cdot \nabla_{\mathbf{r}} f + \mathbf{F} \cdot \nabla_{\mathbf{v}} f = \left( \frac{\partial f}{\partial t} \right)_{\text{coll}}
+\end{equation}
+
+where \( f = f(\mathbf{r}, \mathbf{v}, t) \) is the distribution function, \( \mathbf{r} \) is the position, \( \mathbf{v} \) is the velocity, \( \mathbf{F} \) is the external force and \( \left( \frac{\partial f}{\partial t} \right)_{\text{coll}} \) is the collision term.
+
+The Bhatnagar-Gross-Krook (BGK) approximation simplifies the collision term to 
+
+\begin{equation}\label{eq:collision}
+\left( \frac{\partial f}{\partial t} \right)_{\text{coll}} = -\frac{1}{\tau} (f - f^{\text{eq}})
+\end{equation}
+where \( \tau \) is the relaxation time and \( f^{\text{eq}} \) is the local equilibrium distribution function. We assume that there is a equilibrium distribution to which the system relaxes. How fast this equilibrium is reached is encoded in the relaxation time $\tau$, which corresponds directly to the viscosity of the fluid.\\
+
+The Ansatz for the Lattice Boltzmann Method (LBM) is now to discretise the position space and form a lattice as well as discretising the time. The distributions are then also discretised, with each lattice site having the number of distributions corresponding to neighbouring sites. This number of neighbours depends on the lattice model used. So for each time step the collision is calculated with \autoref{eq:collision} for each of the different distributions $f_i$ on a single lattice site. Then the streaming to the other lattice sites is calculated using the final form of the approximation of \autoref{eq:boltzmann-transport}
+
+\begin{equation}
+f_i(\mathbf{r} + \mathbf{e}_i \Delta t, t + \Delta t) = f_i(\mathbf{r}, t) + \frac{\Delta t}{\tau} \left( f_i^{\text{eq}}(\mathbf{r}, t) - f_i(\mathbf{r}, t) \right)
+\end{equation}
+
+Advantages of the LBM are the high parralisability of the computations, resulting in short simulation times, and the efficient simulation of multi-phase fluids.
+Disadvantages are the high memory consumption and the fact that LBM can't calculate fluids with a high Mach number meaning compressible flows.
 
 
-%********************************** %First Section  **************************************
 
+\subsection{Particle-Particle - Particle-Mesh}
+
+The P3M algorithm, also known as the Particle-Particle Particle-Mesh method, is a computational approach utilized for efficient computation of long-range interactions in systems with periodic boundary conditions. This method is particularly useful in molecular dynamics simulations.
+
+\subsubsection{Ewald summation}
+Ewald summation is a technique used to compute non-neglectable long-range interactions in periodic systems by splitting the potential into short-range and long-range components. Looking at a charge distribution of a Coulomb potential with 
+\begin{equation}
+\rho = \sum_{\mathbf{n} \in \mathbb{L}^3} \sum_{i=1}^{N} q_i \delta(\mathbf{r} - \mathbf{r}_i - \mathbf{n})
+\end{equation}
+we can add a gaussian shielding charge of the form
+$ \rho_{\text{Gauss}}(\mathbf{r}) = \left( \frac{\alpha}{\sqrt{\pi}} \right)^3 e^{-\alpha^2 r^2}$ 
+for each charged particle  with a width $a$, turning the delta function into
+\begin{equation}
+\delta(\mathbf{r}) = \rho_{\text{Gauss}}(\mathbf{r})+ {[\delta(\mathbf{r}) - \rho_{\text{Gauss}}(\mathbf{r})]}.
+\end{equation}
+
+The potential for the Coulomb Ewald Summation can now be written with a real space, k-space and a self-interaction part
+\begin{equation}
+  U = U^{r} + U^{k} + U^{s}
+\end{equation}
+
+\begin{align*}
+  U^{r} &= \frac{l_B}{2} \sum_{\mathbf{m} \in \mathbb{Z}^3} \sum_{i,j}' \frac{q_i q_j \, \text{erfc}(\alpha | \mathbf{r}_{ij} + \mathbf{m}L |)}{| \mathbf{r}_{ij} + \mathbf{m}L |}  \\
+  U^{k} &= \frac{l_B}{2L^3} \sum_{\mathbf{k} \neq 0} \frac{4\pi}{k^2} e^{-k^2 / 4\alpha^2} |\hat{\rho}(\mathbf{k})|^2 \\
+  U^{s} &= -\frac{\alpha l_B}{\sqrt{\pi}} \sum_{i} q_i^2\\
+\end{align*}
+
+\subsubsection{P3M algorithm steps}
+The idea of the P3M algorithm is now to speed up the reciprocal space calculations by calculating them on a grid.
+So for the first step we need to transform the charges onto a mesh. 
+This is done with 
+\begin{equation}
+  \rho_M(\mathbf{r}_p) = \frac{1}{h^3} \sum_{i=1}^{N} q_i W^{p}(\mathbf{r}_p - \mathbf{r}_i)
+\end{equation}
+where $W^{p}(\mathbf{r}_p - \mathbf{r}_i)$ are cardinal B-Splines.
+With the mesh initialized we need ot obtain the fourier transformed charge distribution $\hat{\rho}(k)$, so we can solve the Poisson equation with
+\begin{equation}
+  \hat{\phi}(k) = G(k)\hat{\rho}(k)
+\end{equation}
+where $G(k)$ is the optimal influence function.
+With this it is only a matter of obtaining the field by differentiation in Fourier space $ik\hat{\phi}(k) = \hat{E}(k)$, transforming back to real space  and interpolating the field at position of charges to get the forces for the MD calculations. 
