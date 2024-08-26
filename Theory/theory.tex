@@ -4,7 +4,7 @@
 %*******************************************************************************
 \section{Theory}
 \subsection{Lattice-Boltzmann method}
-The Boltzmann equation describes the statistical behavior of a thermodynamic system out of equilibrium. It is given by:
+The Boltzmann equation describes the statistical behavior of a thermodynamic system out of equilibrium. It is given by
 
 \begin{equation}\label{eq:boltzmann-transport}
 \frac{\partial f}{\partial t} + \mathbf{v} \cdot \nabla_{\mathbf{r}} f + \mathbf{F} \cdot \nabla_{\mathbf{v}} f = \left( \frac{\partial f}{\partial t} \right)_{\text{coll}}
@@ -19,7 +19,7 @@ The Bhatnagar-Gross-Krook (BGK) approximation simplifies the collision term to
 \end{equation}
 where \( \tau \) is the relaxation time and \( f^{\text{eq}} \) is the local equilibrium distribution function. We assume that there is a equilibrium distribution to which the system relaxes. How fast this equilibrium is reached is encoded in the relaxation time $\tau$, which corresponds directly to the viscosity of the fluid.\\
 
-The Ansatz for the Lattice Boltzmann Method (LBM) is now to discretise the position space and form a lattice as well as discretising the time. The distributions are then also discretised, with each lattice site having the number of distributions corresponding to neighbouring sites. This number of neighbours depends on the lattice model used. So for each time step the collision is calculated with \autoref{eq:collision} for each of the different distributions $f_i$ on a single lattice site. Then the streaming to the other lattice sites is calculated using the final form of the approximation of \autoref{eq:boltzmann-transport}
+The Ansatz for the Lattice Boltzmann Method (LBM) is now to discretise the position space and form a lattice as well as discretising the time. The distributions are then also discretised, with each lattice site having the number of distributions corresponding to neighbouring sites. This number of neighbours depends on the lattice model used. So for each time step the collision is calculated with \autoref{eq:collision} for each of the different distributions $f_i$ on a single lattice site. Then, the streaming to the other lattice sites is calculated using the final form of the approximation of \autoref{eq:boltzmann-transport}
 
 \begin{equation}
 f_i(\mathbf{r} + \mathbf{e}_i \Delta t, t + \Delta t) = f_i(\mathbf{r}, t) + \frac{\Delta t}{\tau} \left( f_i^{\text{eq}}(\mathbf{r}, t) - f_i(\mathbf{r}, t) \right)
@@ -30,7 +30,7 @@ Disadvantages are the high memory consumption and the fact that LBM can't calcul
 
 
 
-\subsection{Particle-Particle - Particle-Mesh}
+\subsection{Particle-Particle-Particle-Mesh}
 
 The P3M algorithm, also known as the Particle-Particle Particle-Mesh method, is a computational approach utilized for efficient computation of long-range interactions in systems with periodic boundary conditions. This method is particularly useful in molecular dynamics simulations.
 
